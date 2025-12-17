@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import talib
 import yfinance as yf
+from sklearn.preprocessing import StandardScaler
 
 btc = yf.Ticker("BTC-USD")
 
@@ -128,9 +129,6 @@ for name, func in candlestick_functions.items():
 
 features_df = pd.DataFrame(features, index=df.index)
 
-pattern_cols = [col for col in features_df.columns if col.startswith("CDL")]
-features_df[pattern_cols] = features_df[pattern_cols].apply(lambda col: col.map(lambda x: 1 if x > 0 else (-1 if x < 0 else 0)))
-
 df = pd.concat([df, features_df], axis=1).copy()
 
 intervals = [
@@ -150,21 +148,25 @@ def label_return(r):
 
 df['theta'] = df['change_ptc'].apply(label_return)
 
-intervals = [
-    (-100, -11), (-11, -9), (-9, -7), (-7, -5), (-5, -3),
-    (-3, -1), (-1, -0.8), (-0.8, -0.6), (-0.6, -0.4), (-0.4, -0.2),
-    (-0.2, 0.2),
-    (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1),
-    (1, 3), (3, 5), (5, 7), (7, 9), (9, 11), (11, np.inf)
+#Scale features
+
+cols_to_scale = [
+    'open','high','low','close','volume',
+    'DEMA','EMA','KAMA','MIDPOINT','MIDPRICE','SMA3','SMA5','SMA10','SMA20',
+    'T3','TEMA','TRIMA','WMA','BBAND_upper','BBAND_middle','BBAND_lower','BBAND_width',
+    'BBAND_upper_signal','BBAND_lower_signal','ADX14','ADX20','ADXR','AROONOSC',
+    'BOP','CCI3','CCI5','CCI10','CCI14','CMO','DX','MACD','MACDSIGNAL','MACDHIST',
+    'MINUS_DI','PLUS_DI','MINUS_DM','PLUS_DM','MOM1','MOM3','MOM5','MOM10','APO',
+    'PPO','ROC','ROCP','ROCR','ROCR100','TRIX','ATR','NATR','TRANGE'
 ]
-labels = list(range(-10, 11))
 
-def label_return(r):
-    for (low, high), label in zip(intervals, labels):
-        if low <= r < high:
-            return label
-    return 0
+scaler = StandardScaler()
+df[cols_to_scale] = scaler.fit_transform(df[cols_to_scale])
 
-df['theta'] = df['change_ptc'].apply(label_return)
+#Drop rows with missing features
 
+feature_cols = [col for col in df.columns if col != 'date']
+df = df.dropna(subset=feature_cols).reset_index(drop=True)
+
+#print to csv
 df.to_csv("btc_features_talib.csv", index=False, encoding="utf-8-sig")
