@@ -148,10 +148,12 @@ def label_return(r):
 
 df['theta'] = df['change_ptc'].apply(label_return)
 
+df['close_original'] = df['close'].copy()
+
 #Scale features
 
 cols_to_scale = [
-    'open','high','low','close','volume',
+    'open','high','low', 'close', 'volume',
     'DEMA','EMA', 'HT_TRENDLINE','KAMA','MIDPOINT','MIDPRICE', 'SAR', 'SAREXT', 'SMA3',
     'SMA5','SMA10','SMA20',
     'T3','TEMA','TRIMA','WMA','BBAND_upper','BBAND_middle','BBAND_lower','BBAND_width',

@@ -1,3 +1,7 @@
 data_check.py
 ta_lib-0.6.8-cp311-cp311-win_amd64.whl
-
+btc_feature_correlation.png
+btc_price_timeseries.png
+btc_returns_autocorr.png
+btc_returns_histogram.png
+btc_returns_timeseries.png
