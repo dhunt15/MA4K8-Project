@@ -152,12 +152,13 @@ df['theta'] = df['change_ptc'].apply(label_return)
 
 cols_to_scale = [
     'open','high','low','close','volume',
-    'DEMA','EMA','KAMA','MIDPOINT','MIDPRICE','SMA3','SMA5','SMA10','SMA20',
+    'DEMA','EMA', 'HT_TRENDLINE','KAMA','MIDPOINT','MIDPRICE', 'SAR', 'SAREXT', 'SMA3',
+    'SMA5','SMA10','SMA20',
     'T3','TEMA','TRIMA','WMA','BBAND_upper','BBAND_middle','BBAND_lower','BBAND_width',
     'BBAND_upper_signal','BBAND_lower_signal','ADX14','ADX20','ADXR','AROONOSC',
     'BOP','CCI3','CCI5','CCI10','CCI14','CMO','DX','MACD','MACDSIGNAL','MACDHIST',
     'MINUS_DI','PLUS_DI','MINUS_DM','PLUS_DM','MOM1','MOM3','MOM5','MOM10','APO',
-    'PPO','ROC','ROCP','ROCR','ROCR100','TRIX','ATR','NATR','TRANGE'
+    'PPO','ROC','ROCP','ROCR','ROCR100','TRIX','ATR','TRANGE'
 ]
 
 scaler = StandardScaler()
