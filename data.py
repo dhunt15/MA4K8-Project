@@ -150,6 +150,19 @@ df['theta'] = df['change_ptc'].apply(label_return)
 
 df['close_original'] = df['close'].copy()
 
+feature_columns = list(features_df.columns)
+
+df[feature_columns] = df[feature_columns].shift(1)
+
+n = len(df)
+train_end = int(0.7*n)
+val_end = int(0.85*n)
+
+train_df = df.iloc[:train_end].reset_index(drop=True)
+val_df   = df.iloc[train_end:val_end].reset_index(drop=True)
+test_df  = df.iloc[val_end:].reset_index(drop=True)
+
+
 #Scale features
 
 cols_to_scale = [
@@ -165,11 +178,22 @@ cols_to_scale = [
 
 scaler = StandardScaler()
 df[cols_to_scale] = scaler.fit_transform(df[cols_to_scale])
+train_df[cols_to_scale] = scaler.fit_transform(train_df[cols_to_scale])
+val_df[cols_to_scale] = scaler.transform(val_df[cols_to_scale])
+test_df[cols_to_scale] = scaler.transform(test_df[cols_to_scale])
+
 
 #Drop rows with missing features
 
 feature_cols = [col for col in df.columns if col != 'date']
 df = df.dropna(subset=feature_cols).reset_index(drop=True)
+train_df = train_df.dropna(subset=feature_cols).reset_index(drop=True)
+val_df = val_df.dropna(subset=feature_cols).reset_index(drop=True)
+test_df = test_df.dropna(subset=feature_cols).reset_index(drop=True)
+
 
 #print to csv
 df.to_csv("btc_features_talib.csv", index=False, encoding="utf-8-sig")
+train_df.to_csv("train.csv", index=False, encoding="utf-8-sig")
+val_df.to_csv("validation.csv", index=False, encoding="utf-8-sig")
+test_df.to_csv("test.csv", index=False, encoding="utf-8-sig")
