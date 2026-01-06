@@ -131,6 +131,8 @@ features_df = pd.DataFrame(features, index=df.index)
 
 df = pd.concat([df, features_df], axis=1).copy()
 
+#theta calculations
+
 intervals = [
     (-100, -11), (-11, -9), (-9, -7), (-7, -5), (-5, -3),
     (-3, -1), (-1, -0.8), (-0.8, -0.6), (-0.6, -0.4), (-0.4, -0.2),
@@ -150,9 +152,24 @@ df['theta'] = df['change_ptc'].apply(label_return)
 
 df['close_original'] = df['close'].copy()
 
-feature_columns = list(features_df.columns)
+#recursive volatility
 
+alpha = 0.94
+returns = df['change_ptc'].fillna(0)/100
+sigma2 = np.zeros(len(df))
+sigma2[0] = returns.iloc[0]**2
+for t in range(1, len(df)):
+	sigma2[t] = alpha * sigma2[t-1] + (1-alpha)*returns.iloc[t-1]**2
+
+df['recursive_volatility'] = sigma2
+
+#shift features
+
+exclude_cols = ['theta', 'close_original', 'recursive_volatility', 'change_ptc', 'date']
+feature_columns = [col for col in features_df.columns if col not in exclude_cols]
 df[feature_columns] = df[feature_columns].shift(1)
+
+#split into training/validation/test data
 
 n = len(df)
 train_end = int(0.7*n)
@@ -185,7 +202,7 @@ test_df[cols_to_scale] = scaler.transform(test_df[cols_to_scale])
 
 #Drop rows with missing features
 
-feature_cols = [col for col in df.columns if col != 'date']
+feature_cols = [col for col in features_df.columns if col != 'date']
 df = df.dropna(subset=feature_cols).reset_index(drop=True)
 train_df = train_df.dropna(subset=feature_cols).reset_index(drop=True)
 val_df = val_df.dropna(subset=feature_cols).reset_index(drop=True)
