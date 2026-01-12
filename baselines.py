@@ -99,7 +99,7 @@ def evaluate(wealth, actions, returns):
 
     sharpe = (
         np.mean(daily_returns) / np.std(daily_returns)
-        * np.sqrt(252)
+        * np.sqrt(365.25)
         if np.std(daily_returns) > 0 else 0.0
     )
 
@@ -158,4 +158,3 @@ plt.xticks(rotation=45)
 plt.tight_layout()
 plt.savefig("baseline_wealth.png")
 plt.close()
-
