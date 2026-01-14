@@ -12,6 +12,7 @@ import matplotlib.dates as mdates
 train_df = pd.read_csv("train.csv", encoding="utf-8-sig")
 val_df   = pd.read_csv("validation.csv", encoding="utf-8-sig")
 test_df  = pd.read_csv("test.csv", encoding="utf-8-sig")
+full_df  = pd.concat([train_df, val_df]).reset_index(drop=True)
 
 # Feature columns
 feature_cols = [
@@ -26,6 +27,7 @@ X_test  = test_df[feature_cols]
 y_train = train_df['change_ptc'] / 100.0   # convert to decimal returns
 y_val   = val_df['change_ptc'] / 100.0
 y_test  = test_df['change_ptc'] / 100.0
+full_df["change_ptc"] = full_df["change_ptc"]/100.0
 sigma2_val = val_df['recursive_volatility']
 
 def loss(realized_return, a_t, a_prev, sigma2_t, lam=0.1, c=0.001):
@@ -47,64 +49,66 @@ def always_hold(n):
 def last_return_rule(returns):
     actions = np.zeros(len(returns))
     for t in range(1, len(returns)):
-        actions[t] = np.sign(returns.iloc[t-1])
+        actions[t] = 1.0 if returns.iloc[t-1] > 0 else 0.0
     return actions
 
 #Linear Regression
 
-lr = LinearRegression()
-lr.fit(X_train, y_train)
+pipeline = Pipeline([('scaler', StandardScaler()), ('lr', LinearRegression())])
+pipeline.fit(X_train, y_train)
 
-y_pred_lr = lr.predict(X_val)
-actions_lr = np.clip(np.sign(y_pred_lr), 0, 1)
+y_pred = pipeline.predict(X_val)
+actions_lr = np.where(y_pred > 0, 1.0, 0.0)
 
 #Logistic Regression
 
-logit = Pipeline([
-    ("scaler", StandardScaler()),
-    ("logit", LogisticRegression(
-        max_iter=5000,
-        solver="lbfgs"
-    ))
-])
-logit.fit(X_train, (y_train > 0).astype(int))
+y_train_binary = (y_train > 0).astype(int)
+y_val_binary   = (y_val > 0).astype(int)
 
-proba_up = logit.predict_proba(X_val)[:, 1]
-actions_logit = np.where(proba_up > 0.5, 1.0, 0.0)
+logit_pipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('logit', LogisticRegression(max_iter=5000, solver='lbfgs'))
+])
+
+logit_pipeline.fit(X_train, y_train_binary)
+
+proba_val = logit_pipeline.predict_proba(X_val)[:, 1]  # probability of up move
+
+actions_logit = np.where(proba_val > 0.5, 1.0, 0.0)
+
 
 #Backtest
 
-def backtest(actions, returns, sigma2, capital=1_000, lam=0.1, c=0.001):
-    wealth = np.zeros(len(returns))
-    losses = np.zeros(len(returns))
+def backtest_baseline(actions, returns, capital=1_000, c=0.001):
 
+    wealth = np.zeros(len(returns))
     wealth[0] = capital
+
     a_prev = 0.0
 
-    for t in range(len(returns)):
+    for t in range(1, len(returns)):
         a_t = actions[t]
         r_t = returns.iloc[t]
 
-        losses[t] = loss(r_t, a_t, a_prev, sigma2[t], lam, c)
-        wealth[t] = wealth[t-1] * (1 + a_t * r_t - c * abs(a_t - a_prev)) if t > 0 else capital
+        # portfolio update with transaction costs
+        wealth[t] = wealth[t-1] * (1 + a_t * r_t - c * abs(a_t - a_prev))
 
         a_prev = a_t
 
-    return wealth, losses
+    return wealth
 
-#Evaluation metrics
+#Evaluate
 
-def evaluate(wealth, actions, returns):
+def evaluate_baseline(wealth, actions, returns):
     daily_returns = np.diff(wealth) / wealth[:-1]
 
     sharpe = (
-        np.mean(daily_returns) / np.std(daily_returns)
-        * np.sqrt(365.25)
+        np.mean(daily_returns) / np.std(daily_returns) * np.sqrt(365.25)
         if np.std(daily_returns) > 0 else 0.0
     )
 
     cum_max = np.maximum.accumulate(wealth)
-    drawdown = np.max((cum_max - wealth) / cum_max)
+    max_drawdown = np.max((cum_max - wealth) / cum_max)
 
     hit_rate = np.mean(
         np.sign(actions[:-1]) == np.sign(returns.iloc[1:])
@@ -113,16 +117,18 @@ def evaluate(wealth, actions, returns):
     return {
         "Final Wealth": wealth[-1],
         "Sharpe": sharpe,
-        "Max Drawdown": drawdown,
+        "Max Drawdown": max_drawdown,
         "Hit Rate": hit_rate
     }
 
 #Run baselines 
 
+returns = val_df["change_ptc"] / 100.0
+
 strategies = {
-    "Always Buy": always_buy(len(y_val)),
-    "Always Hold": always_hold(len(y_val)),
-    "Last Return": last_return_rule(y_val),
+    "Always Buy": always_buy(len(returns)),
+    "Always Hold": always_hold(len(returns)),
+    "Last Return": last_return_rule(returns),
     "Linear Regression": actions_lr,
     "Logistic Regression": actions_logit
 }
@@ -130,31 +136,8 @@ strategies = {
 results = {}
 
 for name, actions in strategies.items():
-    wealth, losses = backtest(actions, y_val, sigma2_val)
-    results[name] = evaluate(wealth, actions, y_val)
+    wealth = backtest_baseline(actions, returns)
+    results[name] = evaluate_baseline(wealth, actions, returns)
 
-#Results
-
-val_df['date'] = pd.to_datetime(val_df['date'], errors='coerce')
-val_df = val_df.dropna(subset=['date'])
-
-results_df = pd.DataFrame(results).T
-print(results_df)
-
-plt.figure(figsize=(12, 8))
-
-for name, actions in strategies.items():
-    wealth, _ = backtest(actions, y_val, sigma2_val)
-    plt.plot(val_df['date'], wealth, label=name)
-
-plt.legend()
-plt.title("Cumulative Wealth – Baseline Strategies")
-plt.xlabel("Date")
-plt.ylabel("Wealth ($)")
-plt.grid(alpha=0.3)
-plt.gca().xaxis.set_major_locator(mdates.MonthLocator())
-plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
-plt.xticks(rotation=45)  
-plt.tight_layout()
-plt.savefig("baseline_wealth.png")
-plt.close()
+baseline_df = pd.DataFrame(results).T
+print(baseline_df)
