@@ -161,7 +161,7 @@ sigma2[0] = returns.iloc[0]**2
 for t in range(1, len(df)):
 	sigma2[t] = alpha * sigma2[t-1] + (1-alpha)*returns.iloc[t-1]**2
 
-df['recursive_volatility'] = sigma2
+df['recursive_volatility'] = sigma2/sigma2.mean()
 
 #shift features
 
