@@ -42,7 +42,7 @@ def always_buy(n):
     return np.ones(n)
 
 def always_hold(n):
-    return np.zeros(n)
+    return np.ones(n)/2
 
 #Last return baseline
 
@@ -127,7 +127,7 @@ returns = val_df["change_ptc"] / 100.0
 
 strategies = {
     "Always Buy": always_buy(len(returns)),
-    "Always Hold": always_hold(len(returns)),
+    "50/50 strategy": always_hold(len(returns)),
     "Last Return": last_return_rule(returns),
     "Linear Regression": actions_lr,
     "Logistic Regression": actions_logit
