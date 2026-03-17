@@ -6,6 +6,8 @@ import matplotlib.dates as mdates
 from sklearn.model_selection import ParameterGrid
 from joblib import Parallel, delayed
 from sklearn.calibration import CalibratedClassifierCV
+import xgboost as xgb
+from xgboost import XGBClassifier
 
 # --- Load your data ---
 df_train = pd.read_csv("train.csv", encoding="utf-8-sig")
@@ -113,24 +115,16 @@ def evaluate_prediction(P, y_true):
     return metrics
 
 
-def walk_forward_cv_rf_predictive(
-    df,
-    feature_cols,
-    theta_midpoints,
-    train_size=500,
-    val_size=50,
-    step=50,
-    rf_params=None
-):
+def walk_forward_cv_xgb_predictive(df, feature_cols, theta_midpoints, train_size=500,
+    val_size=50, step=50, xgb_params=None, early_stopping_rounds=25):
     results = []
+    K = len(theta_midpoints)
 
-    if rf_params is None:
-        rf_params = dict(
-            n_estimators=100,
-            criterion="entropy",
-            random_state=42,
-            n_jobs=1
-        )
+    if xgb_params is None:
+        xgb_params = dict(n_estimators=500, learning_rate=0.05, max_depth=4, subsample=0.8,
+            colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0, min_child_weight=1.0,
+            gamma=0.0, tree_method="hist", objective="multi:softprob", num_class=K,
+            eval_metric="mlogloss", random_state=42, n_jobs=1)
 
     n = len(df)
 
@@ -139,40 +133,29 @@ def walk_forward_cv_rf_predictive(
         val_idx   = slice(start + train_size, start + train_size + val_size)
 
         df_train = df.iloc[train_idx]
-        df_val   = df.iloc[val_idx]
+        df_val = df.iloc[val_idx]
 
         X_train = df_train[feature_cols]
         y_train = combine_bins(df_train["theta"]) + 4
         X_val   = df_val[feature_cols]
         y_val   = combine_bins(df_val["theta"]) + 4
 
-        rf = RandomForestClassifier(**rf_params)
-        rf.fit(X_train, y_train)
+        model = XGBClassifier(**xgb_params)
+        model.fit(X_train, y_train, eval_set = [(X_val, y_val)], verbose = False) 
 
-        P_raw = rf.predict_proba(X_val)
-        P = np.zeros((len(X_val), len(theta_midpoints)))
-
-        for i, cls in enumerate(rf.classes_):
-            P[:, cls] = P_raw[:, i]
+        P = model.predict_proba(X_val)
+        if P.shape[1] != K:
+            raise ValueError(f"Expected {K} classes but got {P.shape}")
 
         pred_metrics = evaluate_prediction(P, y_val)
-
         results.append(pred_metrics)
 
     return pd.DataFrame(results)
 
-def evaluate_rf_params(params, full_df, feature_cols, theta_midpoints,
-                       train_size=500, val_size=50, step=50):
-    """Train and evaluate RF for a single parameter combination."""
-    cv_res = walk_forward_cv_rf_predictive(
-        full_df,
-        feature_cols,
-        theta_midpoints,
-        train_size=train_size,
-        val_size=val_size,
-        step=step,
-        rf_params=params
-    )
+def evaluate_xgb_params(params, full_df, feature_cols, theta_midpoints, train_size=500,
+    val_size=50, step=50):
+    cv_res = walk_forward_cv_xgb_predictive(full_df, feature_cols, theta_midpoints,
+        train_size=train_size, val_size=val_size, step=step, xgb_params=params)
     return {
         **params,
         "LogLoss_median": cv_res["LogLoss"].median(),
@@ -181,47 +164,31 @@ def evaluate_rf_params(params, full_df, feature_cols, theta_midpoints,
         "ROC_AUC_mean": cv_res["ROC_AUC"].mean()
     }
 
-def tune_rf_parallel(rf_grid, full_df, feature_cols, theta_midpoints,
-                     train_size=500, val_size=50, step=50, n_jobs=-1):
-    # Generate all parameter combinations
-    param_list = list(ParameterGrid(rf_grid))
+def tune_xgb_parallel(xgb_grid, full_df, feature_cols, theta_midpoints, train_size=500,
+    val_size=50, step=50, n_jobs=-1):
+    
+    param_list = list(ParameterGrid(xgb_grid))
 
-    # Run in parallel
-    rf_results = Parallel(n_jobs=n_jobs)(
-        delayed(evaluate_rf_params)(params, full_df, feature_cols, theta_midpoints,
-                                    train_size, val_size, step)
+    xgb_results = Parallel(n_jobs=n_jobs)(
+        delayed(evaluate_xgb_params)(
+            params, full_df, feature_cols, theta_midpoints, train_size, val_size, step
+        )
         for params in param_list
     )
 
-    # Convert to DataFrame
-    rf_df = pd.DataFrame(rf_results)
+    xgb_df = pd.DataFrame(xgb_results)
 
-    # Select best row by LogLoss then MSE
-    best_row = rf_df.sort_values(by=["ROC_AUC_mean", "DirectionalAcc_mean"], 
+    # Pick best by ROC AUC then Directional Acc (same as your RF selection)
+    best_row = xgb_df.sort_values(by=["ROC_AUC_mean", "DirectionalAcc_mean"],
         ascending=[False, False]).iloc[0]
 
-    max_depth_val = best_row["max_depth"]
-    max_depth = None if pd.isna(max_depth_val) else int(max_depth_val)
+    # Return the best params as a plain dict
+    best_params = {k: best_row[k] for k in xgb_grid.keys()}
 
-    best_params = {
-        "n_estimators": int(best_row["n_estimators"]),
-        "max_depth": max_depth,
-        "max_features": best_row["max_features"],
-        "criterion": best_row["criterion"],
-        "min_samples_split": int(best_row["min_samples_split"]),
-        "min_samples_leaf": int(best_row["min_samples_leaf"])
-    }
+    print("Best XGB parameters:")
+    print(best_params)
 
-    print(f"Best RF parameters:")
-    print(f"n_estimators = {best_params['n_estimators']}, "
-          f"max_depth = {best_params['max_depth']}, "
-          f"max_features = {best_params['max_features']}, "
-          f"criterion = {best_params['criterion']}, "
-          f"min_samples_split = {best_params['min_samples_split']}, "
-          f"min_samples_leaf = {best_params['min_samples_leaf']}"
-        )
-    
-    return best_params, rf_df
+    return best_params, xgb_df
 
 def tilt_posterior_to_match_p_pos(P, pos_idx, p_pos_cal, eps=1e-12):
     """
@@ -247,52 +214,65 @@ def tilt_posterior_to_match_p_pos(P, pos_idx, p_pos_cal, eps=1e-12):
 
     return P_tilt
 
-rf_grid = {
-    "n_estimators": int(200),
-    "max_depth": None,
-    "max_features": 0.8, 
-    "criterion": "entropy",
-    "min_samples_split": 2,
-    "min_samples_leaf": 2
-}
+def to_python_scalars(d):
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, (np.integer,)):
+            out[k] = int(v)
+        elif isinstance(v, (np.floating,)):
+            out[k] = float(v)
+        else:
+            out[k] = v
+    return out
 
-full_df = df_train
-#best_rf_params, rf_df = tune_rf_parallel(rf_grid, full_df, feature_cols, theta_midpoints, 
- #   train_size = 500, val_size = 50, step = 50, n_jobs=12)
-
-best_rf_params = rf_grid
-
-#Random forest model
-from sklearn.model_selection import TimeSeriesSplit
-
-rf = RandomForestClassifier(**best_rf_params,random_state = 42, n_jobs = 1)
-rf.fit(X_train, y_train)
-
-P_val_raw = rf.predict_proba(X_val)
 K = len(theta_midpoints)
 
-P = np.zeros((len(X_val), K))
-for i, cls in enumerate(rf.classes_):
-    P[:, cls] = P_val_raw[:, i]
+xgb_grid = {
+    "n_estimators": [800],
+    "learning_rate": [0.05],
+    "max_depth": [4],
+    "subsample": [0.8],
+    "colsample_bytree": [0.6],
+    "min_child_weight": [1.0],
+    "gamma": [0.5],
+    "reg_lambda": [1.0],
+    "reg_alpha": [0.0],
 
+    "tree_method": ["hist"],
+    "objective": ["multi:softprob"],
+    "num_class": [K],
+    "eval_metric": ["mlogloss"],
+    "random_state": [42],
+    "n_jobs": [1],
+    "early_stopping_rounds": [25]
+}
+
+best_params, xgb_df = tune_xgb_parallel(xgb_grid, df_train, feature_cols, theta_midpoints,
+    train_size=500, val_size=50, step=50, n_jobs=12)
+
+best_params = to_python_scalars(best_params)
+
+model = XGBClassifier(**best_params)
+
+# optional early stopping using your held-out validation set
+model.fit(X_train, y_train, eval_set=[(X_val, y_val)],verbose=False)
+
+P_val = model.predict_proba(X_val)  # shape (n_val, K)
+
+# --- isotonic calibrate P(theta > 0) ---
 pos_idx = np.where(theta_midpoints > 0)[0]
-p_pos_val = P[:, pos_idx].sum(axis=1)
-
+p_pos_val = P_val[:, pos_idx].sum(axis=1)
 y_pos_val = (theta_midpoints[y_val] > 0).astype(int)
 
 from sklearn.isotonic import IsotonicRegression
 iso = IsotonicRegression(out_of_bounds="clip")
 iso.fit(p_pos_val, y_pos_val)
-
 p_pos_val_cal = iso.transform(p_pos_val)
 
-P_val_tilt = tilt_posterior_to_match_p_pos(P, pos_idx, p_pos_val_cal)
+P_val_cal = tilt_posterior_to_match_p_pos(P_val, pos_idx, p_pos_val_cal)
 
-P_val_cal = P_val_tilt
-P_cal = P_val_tilt
-
-print("Validation metrics: ", evaluate_prediction(P, y_val) )
-print("Calibrated validation metrics: ", evaluate_prediction(P_cal, y_val))
+print("Validation metrics (uncal):", evaluate_prediction(P_val, y_val))
+print("Validation metrics (cal):  ", evaluate_prediction(P_val_cal, y_val))
 
 #Find best alpha, lambda gamma
 
@@ -469,9 +449,9 @@ def walkforward_policy_score(params, P_uncal, P_cal, volatility, returns, n_spli
             mdd_uncal_folds,
             mdd_cal_folds)
 
-def eval_one(params):
+def eval_one(params, P_uncal, P_cal, volatility, returns):
     score_u, score_c, sharpe_u, sharpe_c, mdd_u, mdd_c = walkforward_policy_score(
-        params, P_uncal=P, P_cal=P_cal, volatility=volatility_val, returns=returns_val,
+        params, P_uncal=P_uncal, P_cal=P_cal, volatility=volatility, returns=returns,
         n_splits=5, min_train_size=200, a0=0.5, dd_penalty=0.3, capital=1_000)
 
     alpha, lam, gamma, scale, delta = params
@@ -489,19 +469,16 @@ def eval_one(params):
         "Sharpe_cal_median":   float(np.median(sharpe_c)) if len(sharpe_c) else np.nan,
         "MaxDD_uncal_median":  float(np.median(mdd_u))    if len(mdd_u)    else np.nan,
         "MaxDD_cal_median":    float(np.median(mdd_c))    if len(mdd_c)    else np.nan,
-
-        "Sharpe_uncal_folds": sharpe_u,
-        "Sharpe_cal_folds":   sharpe_c,
-        "MaxDD_uncal_folds":  mdd_u,
-        "MaxDD_cal_folds":    mdd_c,
     }
-
 
 from itertools import product
 
 param_grid = list(product(alpha_list, lambda_list, gamma_list, scale_list, delta_list))
 
-results = Parallel(n_jobs=12, backend="loky")(delayed(eval_one)(p) for p in param_grid)
+results = Parallel(n_jobs=12, backend="loky")(
+    delayed(eval_one)(p, P_val, P_val_cal, volatility_val, returns_val)
+    for p in param_grid
+)
 
 results_df = pd.DataFrame(results)
 
@@ -529,8 +506,8 @@ def plot_reliability(p, y, label, n_bins=10):
 
 plt.figure(figsize=(6,6))
 
-plot_reliability(p_pos, y_pos, label="Uncalibrated RF")
-plot_reliability(p_pos_cal, y_pos, label="Calibrated RF")
+plot_reliability(p_pos, y_pos, label="Uncalibrated XGB")
+plot_reliability(p_pos_cal, y_pos, label="Calibrated XGB")
 
 # Perfect calibration line
 plt.plot([0,1], [0,1], linestyle="--", color="black", alpha=0.7)
@@ -541,7 +518,7 @@ plt.title("Reliability Diagram (Positive Return)")
 plt.legend()
 plt.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig("Reliability diagram")
+plt.savefig("XGB Reliability diagram.png")
 plt.close()
 
 plt.figure(figsize=(6,4))
@@ -552,7 +529,7 @@ plt.ylabel("Density")
 plt.legend()
 plt.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig("Histogram.png")
+plt.savefig("XGB Histogram.png")
 plt.close()
 
 
@@ -567,7 +544,7 @@ print(f"Brier score (calibrated):   {brier_cal:.4f}")
 
 #Trade
 
-actions = compute_actions(P_val_raw, theta_midpoints, volatility_val,
+actions = compute_actions(P_val, theta_midpoints, volatility_val,
                           lam = best_uncal_params["lam"], gamma = best_uncal_params["gamma"],
                           alpha = best_uncal_params["alpha"],
                           signal_scale = best_uncal_params["signal_scale"],
@@ -575,7 +552,7 @@ actions = compute_actions(P_val_raw, theta_midpoints, volatility_val,
 
 print("Mean uncalibrated exposure:", np.mean(actions))
 
-actions_cal = compute_actions(P_cal, theta_midpoints, volatility_val,
+actions_cal = compute_actions(P_val_cal, theta_midpoints, volatility_val,
                           lam = best_uncal_params["lam"], gamma = best_uncal_params["gamma"], 
                           alpha = best_uncal_params["alpha"], 
                           signal_scale = best_uncal_params["signal_scale"],
@@ -590,14 +567,25 @@ metrics_cal = evaluate(wealth_cal, actions_cal, df_val["change_ptc"]/100)
 print("Uncalibrated validation metrics: ", metrics)
 print("Calibrated validation metrics: ", metrics_cal)
 
-val_results_rf = {
+val_results_xgb = {
     "wealth": wealth_cal.tolist(),
     "dates": df_val["date"].astype(str).tolist()
 }
 
+wealth_val_5050 = df_val['close_original']/df_val['close_original'][0] * 500 + 500
+
+val_5050 = {
+    "wealth": wealth_val_5050.tolist(),
+    "dates": df_val["date"].astype(str).tolist()
+}
+
 import json
-with open("rf_val.json", "w") as f:
-    json.dump(val_results_rf, f)
+with open("val_xgb_results.json", "w") as f:
+    json.dump(val_results_xgb, f)
+
+with open("val_5050.json", "w") as f:
+    json.dump(val_5050, f)
+
 
 #Plot model
 
@@ -621,17 +609,15 @@ plt.gca().xaxis.set_major_locator(mdates.MonthLocator())
 plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
 plt.xticks(rotation=45)
 plt.tight_layout()
-plt.savefig("RF2.png")
+plt.savefig("XGB.png")
 plt.close()
 
 #Run on test data
 # --- Step 1: Predict multiclass probabilities on test set (uncalibrated RF) ---
-P_test_raw = rf.predict_proba(X_test)
-K = len(theta_midpoints)
+P_test = model.predict_proba(X_test)
 
-P_test = np.zeros((len(X_test), K))
-for i, cls in enumerate(rf.classes_):
-    P_test[:, cls] = P_test_raw[:, i]
+if P_test.shape[1] != K:
+    raise ValueError(f"Expected {K} classes but got {P_test.shape}")
 
 # --- Step 1.5: Posterior tilt on TEST using calibrated p_pos ---
 pos_idx = np.where(theta_midpoints > 0)[0]
@@ -791,7 +777,7 @@ from statsmodels.graphics.tsaplots import plot_acf
 
 plot_acf(loss_hat, lags=30)
 plt.title("ACF of per-period log P&L loss")
-plt.savefig("ACF.png")
+plt.savefig("XGB ACF.png")
 plt.close()
 
 # Stress test
@@ -842,11 +828,11 @@ def full_probs(rf, X, n_classes=9):
     for i, cls in enumerate(rf.classes_):
         P[:, cls] = P_raw[:, i]
     return P
-
+'''
 
 def run_one_horizon(h,
                    df_train, df_val, df_test,feature_cols, theta_midpoints,
-                   rf_params, action_params,c=0.001):
+                   params, action_params,c=0.001):
 
     # 1) Build horizon datasets (copies)
     tr = add_horizon_target(df_train, h)
@@ -864,8 +850,8 @@ def run_one_horizon(h,
     X_te = te[feature_cols]
 
     # 4) Train RF (no leakage)
-    rf = RandomForestClassifier(**rf_params, random_state=42, n_jobs=1)
-    rf.fit(X_tr, y_tr)
+    model = XGBClassifier(**best_params, random_state = 42, n_jobs = 1)
+    model.fit(X_tr, y_tr)
 
     # 5) Predict probs on val/test (map to full 9-class matrix)
     n_classes = len(theta_midpoints)
@@ -913,15 +899,14 @@ def run_one_horizon(h,
 #h_list = [1, 2, 5, 10]
 h_list = [1]
 
-rf_params = best_rf_params  # your tuned RF params
 action_params = dict(alpha=best_uncal_params["alpha"], lam=best_uncal_params["lam"],
     delta=best_uncal_params["delta"], signal_scale = best_uncal_params["signal_scale"])
 
 def run_horizons_parallel(h_list, df_train, df_val, df_test, feature_cols, theta_midpoints,
-                          rf_params, action_params,c=0.001, method="compound", n_jobs=12):
+                          best_params, action_params,c=0.001, method="compound", n_jobs=12):
     results = Parallel(n_jobs=n_jobs, backend="loky")(
         delayed(run_one_horizon)(h, df_train, df_val, df_test, feature_cols, theta_midpoints,
-            rf_params, action_params,c)
+            best_params, action_params,c)
         for h in h_list
     )
     return pd.DataFrame(results).sort_values("h").reset_index(drop=True)
@@ -929,28 +914,27 @@ def run_horizons_parallel(h_list, df_train, df_val, df_test, feature_cols, theta
 if __name__ == "__main__":
 #    h_list = [1, 2, 5, 10]
     h_list=[1]
-    rf_params = best_rf_params  # your tuned RF hyperparams
     action_params = dict(alpha=best_uncal_params["alpha"], lam=best_uncal_params["lam"],
         delta=best_uncal_params["delta"], signal_scale = best_uncal_params["signal_scale"])
 
     df_h = run_horizons_parallel(h_list,df_train=df_train, df_val=df_val, df_test=df_test,
-        feature_cols=feature_cols, theta_midpoints=theta_midpoints, rf_params=rf_params,
+        feature_cols=feature_cols, theta_midpoints=theta_midpoints, best_params = best_params,
         action_params=action_params, c=0.001, n_jobs=12)
 
     print(df_h.to_string(index=False))
-
+'''
 # --- Step 3: Backtest the strategy ---
 returns_test = df_test["change_ptc"] / 100
 wealth_test = backtest(actions_test, returns_test)
 
-test_results_rf = {
+test_results_xgb = {
     "wealth": wealth_test.tolist(),
     "dates": df_test["date"].astype(str).tolist()
 }
 
-with open("rf_test.json", "w") as f:
-    json.dump(test_results_rf, f)
-
+import json
+with open("test_xgb_results.json", "w") as f:
+    json.dump(test_results_xgb, f)
 
 # --- Step 4: Evaluate strategy ---
 metrics_test = evaluate(wealth_test, actions_test, returns_test)
@@ -977,7 +961,7 @@ plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
 plt.xticks(rotation=45)
 
 plt.tight_layout()
-plt.savefig("RF2_test")
+plt.savefig("XGB_test")
 plt.close()
 
 # --- Optional: plot actions vs returns ---
@@ -994,7 +978,7 @@ plt.gca().xaxis.set_major_locator(mdates.MonthLocator())
 plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
 plt.xticks(rotation=45)
 plt.tight_layout()
-plt.savefig("RF2_actionsvreturns")
+plt.savefig("XGB_actionsvreturns")
 plt.close()
 
 #Drawdown plot
@@ -1005,6 +989,14 @@ def drawdown(wealth):
 wealth5050 = df_test['close_original']/df_test['close_original'][0] * 500 + 500
 wealth5050 = wealth5050.to_numpy()
 print("Final wealth 50/50:", wealth5050[-1])
+
+test_5050 = {
+    "wealth": wealth5050.tolist(),
+    "dates": df_test["date"].astype(str).tolist()
+}
+
+with open("test_5050.json", "w") as f:
+    json.dump(test_5050, f)
 
 wealth = wealth_test
 dd = drawdown(wealth)
@@ -1021,7 +1013,7 @@ plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
 plt.xticks(rotation=45)
 plt.legend()
 plt.tight_layout()
-plt.savefig("drawdown.png")
+plt.savefig("XGB_drawdown.png")
 plt.close()
 
 #Annualised returns
@@ -1117,7 +1109,7 @@ def compute_model_returns(actions, returns, c=0.001):
 
 r_model = compute_model_returns(actions_test, returns_test)
 r_market = returns_test
-'''
+
 print("Mean model return:", r_model.mean())
 print("Mean BTC return:", r_market.mean())
 print("Mean exposure:", actions_test.mean())
@@ -1126,7 +1118,7 @@ X = sm.add_constant(r_market)
 model = sm.OLS(r_model, X).fit(cov_type='HAC', cov_kwds={'maxlags':6})
 
 print(model.summary())
-'''
+
 import numpy as np
 
 T = len(r_model)
@@ -1147,3 +1139,4 @@ sharpe_simple = ann_return / ann_vol
 
 print("Annualised return (mean-based):", ann_return)
 print("Sharpe (simple returns):", sharpe_simple)
+

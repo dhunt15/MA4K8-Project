@@ -147,11 +147,19 @@ print(baseline_df)
 val_df['date'] = pd.to_datetime(val_df['date'], errors='coerce')
 val_df = val_df.dropna(subset=['date'])
 
+colour_map = {
+    "Always Buy": "red",
+    "50/50 strategy": "orange",
+    "Last Return": "blue",
+    "Linear Regression": "green",
+    "Logistic Regression": "purple"
+}
+
 plt.figure(figsize=(12, 8))
 
 for name, actions in strategies.items():
     wealth = backtest_baseline(actions, returns)
-    plt.plot(val_df['date'], wealth, label=name)
+    plt.plot(val_df['date'], wealth, label=name, color = colour_map.get(name, "gray"))
 
 plt.title("Cumulative Wealth – Baseline Strategies")
 plt.xlabel("Date")

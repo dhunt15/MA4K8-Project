@@ -13,11 +13,13 @@ df = df.sort_values('date').reset_index(drop=True)
 # -----------------------------
 # 3️⃣ Time series plots
 # -----------------------------
-plt.figure(figsize=(12, 5))
+plt.figure(figsize=(20, 6))
 plt.plot(df['date'], df['close_original'], color='blue')
-plt.title('BTC Price Over Time')
-plt.xlabel('Date')
-plt.ylabel('Price ($)')
+plt.title('BTC Price Over Time', fontsize=18)
+plt.xlabel('Date', fontsize=14)
+plt.ylabel('Price ($)', fontsize=14)
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
 plt.grid(True)
 plt.savefig("btc_price_timeseries.png")
 plt.close()
